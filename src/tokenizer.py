@@ -1,5 +1,6 @@
 import os
 from collections import Counter
+from sys import prefix
 from typing import List, Union, Iterable
 
 # Class for tokenizer. Mind many of these comments are for my own tracking purposes.
@@ -88,3 +89,75 @@ class CharTokenizer:
         if not self.is_fitted():
             raise RuntimeError("Tokenizer not fitted. Call fit(...) first.")
         return self.vocab_size
+
+    def save(self, path: str) -> None:
+        """
+        Serialize the tokenizer to a JSON file at `path`.
+        Writes atomically (via a temp file + replace) to avoid partial files.
+        """
+        if not self.is_fitted():
+            raise RuntimeError("Tokenizer not fitted. Call fit(...) before save().")
+
+        payload = {
+            "version": "char-tokenizer.v1",
+            "stoi": self.stoi,          # dict[str, int]
+            "pad_id": self.pad_id,      # may be None
+            "unk_id": self.unk_id,      # may be None
+        }
+
+        # Ensure parent directory exists
+        parent = os.path.dirname(os.path.abspath(path))
+        if parent and not os.path.isdir(parent):
+            os.makedirs(parent, exist_ok=True)
+
+        # Atomic write: write to a temp file, then replace
+        fd, tmp_path = tempfile.mkstemp(dir=parent or None, prefix=".tmp_tok_", suffix=".json")
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                json.dump(payload, f, ensure_ascii=False, indent=2)
+            os.replace(tmp_path, path)
+        except Exception:
+            # On error, best-effort cleanup
+            try:
+                if os.path.exists(tmp_path):
+                    os.remove(tmp_path)
+            finally:
+                raise
+
+    def load(self, path: str) -> None:
+        """
+        Load tokenizer state from a JSON file into THIS instance.
+        Overwrites any existing state on the instance.
+        """
+        if not os.path.isfile(path):
+            raise FileNotFoundError(f"No such file: {path!r}")
+
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+
+        # Basic validation
+        if "stoi" not in data or not isinstance(data["stoi"], dict):
+            raise ValueError("Invalid tokenizer file: missing or bad 'stoi'.")
+        if "pad_id" not in data or "unk_id" not in data:
+            raise ValueError("Invalid tokenizer file: missing 'pad_id'/'unk_id'.")
+
+        self.stoi = {str(s): int(i) for s, i in data["stoi"].items()}
+        self.pad_id = data["pad_id"] if data["pad_id"] is not None else None
+        self.unk_id = data["unk_id"] if data["unk_id"] is not None else None
+
+        # Rebuild inverse + size
+        self.itos = {i: s for s, i in self.stoi.items()}
+        self.vocab_size = len(self.stoi)
+
+        # Sanity: mappings must invert
+        if any(self.itos[self.stoi[s]] != s for s in self.stoi):
+            raise ValueError("Loaded tokenizer has inconsistent stoi/itos.")
+
+    @classmethod
+    def from_file(cls, path: str) -> "CharTokenizer":
+        """
+        Construct a new CharTokenizer from a saved JSON file.
+        """
+        tok = cls()
+        tok.load(path)
+        return tok
